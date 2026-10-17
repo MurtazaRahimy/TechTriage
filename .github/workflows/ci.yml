@@ -1,0 +1,95 @@
+# TechTriage - CI/Build workflow (Level 1)
+#
+# Push to main or develop -> build the image, smoke-test it, push to GHCR
+# Pull request            -> build and smoke-test only (nothing is uploaded)
+#
+# Image tags pushed to ghcr.io/<owner>/techtriage:
+#   <full commit SHA>   always (the immutable release tag)
+#   latest              pushes to main
+#   develop             pushes to develop
+#
+# Level 3 adds lint + pytest jobs; Level 4 adds the SSM deploy jobs.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # lets GITHUB_TOKEN push to GHCR (no extra password)
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Work out image name and tags
+        run: |
+          # GHCR names must be lowercase
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/techtriage"
+          # For pull requests use the PR head commit, not GitHub's merge commit
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          TAGS="-t ${IMAGE}:${SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then TAGS="${TAGS} -t ${IMAGE}:latest"; fi
+          if [ "${GITHUB_REF}" = "refs/heads/develop" ]; then TAGS="${TAGS} -t ${IMAGE}:develop"; fi
+          {
+            echo "IMAGE=${IMAGE}"
+            echo "SHA=${SHA}"
+            echo "TAGS=${TAGS}"
+          } >> "$GITHUB_ENV"
+          echo "Image: ${IMAGE}"
+          echo "Commit SHA: ${SHA}"
+          echo "Tags: ${TAGS}"
+
+      - name: Build image
+        run: |
+          # TAGS is intentionally unquoted so it splits into several -t flags
+          # shellcheck disable=SC2086
+          docker build \
+            --build-arg GIT_SHA="${SHA}" \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${SHA}" \
+            ${TAGS} .
+
+      - name: Smoke test image
+        run: |
+          docker run -d --name smoke -p 8080:80 -e APP_ENV=ci "${IMAGE}:${SHA}"
+          for _ in $(seq 1 15); do
+            curl -fsS http://localhost:8080/health && break
+            sleep 1
+          done
+          echo "--- /version ---"
+          curl -fsS http://localhost:8080/version | tee version.json
+          echo
+          grep -q "\"version\":\"${SHA}\"" version.json
+          grep -q "\"environment\":\"ci\"" version.json
+          curl -fsS http://localhost:8080/ | grep -q "TechTriage"
+          echo "Smoke test passed"
+
+      - name: Show container log
+        if: always()
+        run: docker logs smoke || true
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push --all-tags "${IMAGE}"
+          echo "### Pushed ${IMAGE}:${SHA}" >> "$GITHUB_STEP_SUMMARY"

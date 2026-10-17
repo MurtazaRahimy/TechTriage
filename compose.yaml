@@ -1,0 +1,29 @@
+# TechTriage - Docker Compose stack
+#
+# Level 1: one service (the placeholder page).
+# Level 3: the "web" image becomes the Flask app and a "db" service
+#          (PostgreSQL on a named volume, NOT published to the internet)
+#          is added here.
+#
+# Each server keeps its own values in /opt/techtriage/.env (never in Git):
+#   APP_ENV=production
+#   IMAGE=ghcr.io/murtazarahimy/techtriage
+#   IMAGE_TAG=<commit sha or latest>
+
+name: techtriage
+
+services:
+  web:
+    image: ${IMAGE:?set IMAGE in .env}:${IMAGE_TAG:-latest}
+    container_name: techtriage-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      APP_ENV: ${APP_ENV:?set APP_ENV in .env}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,4 @@
+# Keep Linux line endings for scripts and config (they run on Linux servers)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
